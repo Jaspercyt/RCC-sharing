@@ -1,0 +1,1 @@
+sudo kubeadm join 192.168.56.10:6443 --token 612o4d.0usraevz7t98wjj5 --discovery-token-ca-cert-hash sha256:770f9eb4533bed32076cce1f036875f3c676cd41de941bd8631f0f542b04d68c

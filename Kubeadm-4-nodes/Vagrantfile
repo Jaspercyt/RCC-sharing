@@ -1,0 +1,133 @@
+Vagrant.configure("2") do |config|
+  config.vm.box = "bento/ubuntu-20.04"
+  config.vm.box_version = "202206.03.0"
+  
+  config.vm.define "nfs-server" do |nfsserver|
+    nfsserver.vm.hostname = "NFS-Server"
+    nfsserver.vm.network "private_network", ip: "192.168.56.20"
+    nfsserver.vm.provider "virtualbox" do |v|
+     v.memory = 2048
+     v.cpus = 2
+    end
+    nfsserver.vm.provision "shell", privileged: false, inline: <<-SHELL
+      # install NFS server and create directory for our exports
+      sudo apt-get install -y nfs-kernel-server
+      sudo mkdir -p /export/volumes
+      sudo mkdir -p /export/volumes/pod
+      # config NFS export
+      sudo bash -c 'echo "/export/volumes *(rw,no_root_squash,no_subtree_check)" > /etc/exports'
+      cat /etc/exports
+      sudo systemctl restart nfs-kernel-server.service
+    SHELL
+  end
+
+  config.vm.define "master" do |master|
+    master.vm.hostname = "master"
+    master.vm.network "private_network", ip: "192.168.56.10"
+    master.vm.provider "virtualbox" do |v|
+     v.memory = 4096
+     v.cpus = 4
+    end
+
+    master.vm.provision "shell", privileged: true, path: "./setup/setup-master.sh"
+    master.vm.provision "shell", privileged: false, inline: <<-SHELL
+      # 初始化 kubeadm
+      sudo kubeadm init --apiserver-advertise-address=192.168.56.10 --pod-network-cidr=10.244.0.0/16
+      mkdir -p $HOME/.kube
+      sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+      sudo chown $(id -u):$(id -g) $HOME/.kube/config
+      # 安裝 CNI
+      sudo cp -f /vagrant/setup/kube-flannel.yml /etc/kubernetes/manifests/kube-flannel.yml
+      cd /etc/kubernetes/manifests
+      kubectl apply -f kube-flannel.yml
+      cd /home/vagrant
+      # 命令補全
+      sudo apt-get install bash-completion
+      source /usr/share/bash-completion/bash_completion
+      echo 'source <(kubectl completion bash)' >>~/.bashrc
+      kubectl completion bash
+      # 產生沒有期限 token
+      mkdir /vagrant/kubeadm
+      echo &(kubeadm token create --ttl 0) > /home/vagrant/token
+      cp -f /home/vagrant/token /vagrant/kubeadm/token
+      echo &(openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt | openssl rsa -pubin -outform der 2>/dev/null |    openssl dgst -sha256 -hex | sed 's/^.* //') > /home/vagrant/sha256
+      cp -f /home/vagrant/sha256 /vagrant/kubeadm/sha256
+      echo sudo kubeadm join 192.168.56.10:6443 --token "$(</vagrant/kubeadm/token)" --discovery-token-ca-cert-hash sha256:"$(</vagrant/kubeadm/sha256)" > /vagrant/kubeadm/kubeadm-join
+      rm sha256 token
+      # 修改 Internal IP
+      sudo sed -i 'a KUBELET_EXTRA_ARGS="--node-ip=192.168.56.10"' /var/lib/kubelet/kubeadm-flags.env
+      sudo systemctl daemon-reload
+      sudo systemctl restart kubelet
+      # 安裝 NFS Clinet
+      sudo apt-get install -y nfs-common
+      # 掛載 NFS 目錄
+      sudo mount -t nfs 192.168.56.20:/export/volumes /mnt/
+      mount | grep nfs
+      # 安裝 bridge-utils net-tools
+      sudo apt install bridge-utils net-tools
+      # 安裝 jq
+      sudo apt install -y jq
+      # 安裝 etcdctl
+      export RELEASE=3.5.3
+      wget https://github.com/etcd-io/etcd/releases/download/v${RELEASE}/etcd-v${RELEASE}-linux-amd64.tar.gz
+      tar -zxvf etcd-v${RELEASE}-linux-amd64.tar.gz
+      cd etcd-v${RELEASE}-linux-amd64
+      sudo cp etcdctl /usr/local/bin
+      etcdctl version
+      rm -rf /home/vagrant/etcd-v3.5.3-linux-amd64 /home/vagrant/etcd-v3.5.3-linux-amd64.tar.gz
+      # 安裝 tree
+      sudo apt install -y tree
+    SHELL
+  end
+
+  config.vm.define "worker-01" do |worker01|
+    worker01.vm.hostname = "worker01"
+    worker01.vm.network "private_network", ip: "192.168.56.11"
+    worker01.vm.provider "virtualbox" do |v|
+     v.memory = 2048
+     v.cpus = 2
+    end
+    worker01.vm.provision "shell", privileged: true, path: "./setup/setup-worker.sh"
+    worker01.vm.provision "shell", privileged: false, inline: <<-SHELL
+      # 執行 kubeadm join
+      sh /vagrant/kubeadm/kubeadm-join
+      # 修改 Internal IP
+      sudo sed -i 'a KUBELET_EXTRA_ARGS="--node-ip=192.168.56.11"' /var/lib/kubelet/kubeadm-flags.env
+      sudo systemctl daemon-reload
+      sudo systemctl restart kubelet
+      # 安裝 NFS Clinet
+      sudo apt-get install -y nfs-common
+      # 掛載 NFS 目錄
+      sudo mount -t nfs 192.168.56.20:/export/volumes /mnt/
+      mount | grep nfs
+      # 安裝 bridge-utils net-tools
+      sudo apt install bridge-utils net-tools
+    SHELL
+  end
+
+  config.vm.define "worker-02" do |worker02|
+    worker02.vm.hostname = "worker02"
+    worker02.vm.network "private_network", ip: "192.168.56.12"
+    worker02.vm.provider "virtualbox" do |v|
+     v.memory = 2048
+     v.cpus = 2
+    end
+    worker02.vm.provision "shell", privileged: true, path: "./setup/setup-worker.sh"
+    worker02.vm.provision "shell", privileged: false, inline: <<-SHELL
+      # 執行 kubeadm join
+      sh /vagrant/kubeadm/kubeadm-join
+      # 修改 Internal IP
+      sudo sed -i 'a KUBELET_EXTRA_ARGS="--node-ip=192.168.56.12"' /var/lib/kubelet/kubeadm-flags.env
+      sudo systemctl daemon-reload
+      sudo systemctl restart kubelet
+      # 安裝 NFS Clinet
+      sudo apt-get install -y nfs-common
+      # 掛載 NFS 目錄
+      sudo mount -t nfs 192.168.56.20:/export/volumes /mnt/
+      mount | grep nfs
+      # 安裝 bridge-utils net-tools
+      sudo apt install bridge-utils net-tools
+    SHELL
+  end
+
+end
